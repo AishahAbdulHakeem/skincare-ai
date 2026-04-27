@@ -76,7 +76,7 @@ def load_artifacts():
  review_summaries, top_ingredients, model, scaler,
  top_ingredients_list) = load_artifacts()
 
-# ── Load sentiment lookup for accurate predictions ─────────────────────────────
+# ── Load sentiment lookup ──────────────────────────────────────────────────────
 @st.cache_data
 def load_sentiment_lookup():
     skincare = pd.read_pickle("data/processed/skincare_final.pkl")
@@ -95,11 +95,49 @@ def get_product_options():
     }
     return dict(sorted(options.items(), key=lambda x: x[1]))
 
-product_options  = get_product_options()
-name_to_id       = {v: k for k, v in product_options.items()}
+product_options = get_product_options()
+name_to_id      = {v: k for k, v in product_options.items()}
 
-# ── Compatibility function ─────────────────────────────────────────────────────
+# ── ML predicted rating ────────────────────────────────────────────────────────
+def predict_rating(product_id):
+    """
+    Runs the trained Gradient Boosting model on the product's
+    227-feature vector (224 ingredient features + 3 sentiment features)
+    to produce a predicted rating.
+    """
+    if product_id not in product_ingredients:
+        return None
+
+    ing_list   = product_ingredients[product_id]
+
+    # 224 binary ingredient features
+    ing_vector = [1 if ing in ing_list else 0 for ing in top_ingredients_list]
+
+    # 3 sentiment features — use actual stored values, fall back to dataset means
+    sent = sentiment_lookup.get(product_id, {
+        'mean_sentiment': 0.65,
+        'pct_positive':   0.86,
+        'review_count':   0
+    })
+    sentiment_scaled = scaler.transform([[
+        sent['mean_sentiment'],
+        sent['pct_positive'],
+        sent['review_count']
+    ]])
+
+    # Full 227-feature vector — same as Notebook 03
+    features  = np.hstack([ing_vector, sentiment_scaled[0]])
+    predicted = model.predict([features])[0]
+
+    return round(float(np.clip(predicted, 1.0, 5.0)), 2)
+
+# ── Compatibility check ────────────────────────────────────────────────────────
 def check_compatibility(routine_ingredients, product_id):
+    """
+    Scores cross-pairs between routine ingredients and new product ingredients
+    using the co-occurrence lookup table built in Notebook 04.
+    Returns raw ratio score, risk label, and flagged pairs.
+    """
     if product_id not in product_ingredients:
         return None, "Product not found", []
 
@@ -133,47 +171,122 @@ def check_compatibility(routine_ingredients, product_id):
 
     return round(avg_score, 4), label, flagged
 
-# ── ML prediction function ─────────────────────────────────────────────────────
-def predict_rating(product_id):
-    if product_id not in product_ingredients:
-        return None
+# ── Personalized routine score ─────────────────────────────────────────────────
+def get_routine_score(product_id, routine_ingredients):
+    """
+    Combines ML predicted rating (60%) + normalized ingredient
+    compatibility ratio (40%) into a single personalized 1-5 score.
 
-    ing_list   = product_ingredients[product_id]
+    This score changes based on the user's specific routine ingredients,
+    making it a personalized output the user cannot get from reviews alone.
+    """
+    predicted = predict_rating(product_id)
+    if predicted is None:
+        return None, None, []
 
-    # 224 ingredient binary features
-    ing_vector = [1 if ing in ing_list else 0 for ing in top_ingredients_list]
+    compat_score, label, flagged = check_compatibility(
+        routine_ingredients, product_id
+    )
+    if compat_score is None:
+        return None, label, flagged
 
-    # 3 sentiment features — use actual stored values, fall back to dataset means
-    sent = sentiment_lookup.get(product_id, {
-        'mean_sentiment': 0.65,
-        'pct_positive':   0.86,
-        'review_count':   0
-    })
-    sentiment_scaled = scaler.transform([[
-        sent['mean_sentiment'],
-        sent['pct_positive'],
-        sent['review_count']
-    ]])
+    # Normalize compatibility ratio → 1-5 scale
+    # ratio = 1.0 (neutral)       → 3.0
+    # ratio >= 2.0 (compatible)   → 5.0
+    # ratio <= 0.5 (incompatible) → 1.0
+    compat_normalized = np.clip(1 + (compat_score - 0.5) * (4 / 1.5), 1.0, 5.0)
 
-    # Full 227-feature vector — same as Notebook 03
-    features  = np.hstack([ing_vector, sentiment_scaled[0]])
-    predicted = model.predict([features])[0]
+    # Weighted combination
+    final_score = (predicted * 0.6) + (compat_normalized * 0.4)
+    final_score = round(float(np.clip(final_score, 1.0, 5.0)), 2)
 
-    return round(float(np.clip(predicted, 1.0, 5.0)), 2)
+    return final_score, label, flagged
 
-# ── Product card renderer ──────────────────────────────────────────────────────
+# ── App explanation generator ──────────────────────────────────────────────────
+def generate_app_explanation(routine_score, label, flagged, actual_rating):
+    """
+    Generates a plain English explanation of the routine score,
+    combining risk label, flagged pairs, and score context.
+    """
+    if routine_score is None:
+        return "Not enough ingredient data to generate an explanation."
+
+    lines = []
+
+    # Score context
+    if routine_score >= 4.0:
+        lines.append(
+            f"This product scores {routine_score} / 5 for your routine — "
+            f"a strong match based on its ingredient profile and overall quality."
+        )
+    elif routine_score >= 3.0:
+        lines.append(
+            f"This product scores {routine_score} / 5 for your routine — "
+            f"a reasonable match, though some caution is advised."
+        )
+    else:
+        lines.append(
+            f"This product scores {routine_score} / 5 for your routine — "
+            f"its ingredient profile may not complement your current routine well."
+        )
+
+    # Risk label context
+    if label == "Low Risk":
+        lines.append(
+            "Its ingredients tend to co-occur with high-rated products "
+            "alongside your routine — generally a safe addition."
+        )
+    elif label == "Moderate Risk":
+        lines.append(
+            "Some ingredient combinations show mixed signals with your routine. "
+            "A patch test is recommended before full use."
+        )
+    elif label == "High Risk":
+        lines.append(
+            "Several ingredient combinations tend to appear in lower-rated products "
+            "alongside your routine. Use with caution."
+        )
+
+    # Flagged pairs context
+    if flagged:
+        pair_strs = " and ".join(
+            [f"{p[0]} + {p[1]}" for p, _ in flagged[:2]]
+        )
+        lines.append(
+            f"{len(flagged)} potentially problematic combination(s) detected "
+            f"({pair_strs}). These pairs frequently appear in lower-rated products."
+        )
+
+    # Actual vs routine score gap
+    if actual_rating and routine_score:
+        gap = routine_score - actual_rating
+        if gap > 0.3:
+            lines.append(
+                "Notably, this product scores higher for your specific routine "
+                "than its general rating suggests — your ingredients may bring "
+                "out its best qualities."
+            )
+        elif gap < -0.3:
+            lines.append(
+                "This product's general rating is higher than its score for your "
+                "routine — it may perform better for different ingredient combinations."
+            )
+
+    return " ".join(lines)
+
+# ── Product card ───────────────────────────────────────────────────────────────
 def render_product_card(product_id, routine_ingredients):
     name    = product_names.get(product_id, product_id)
     brand   = brand_names.get(product_id, "")
     summary = review_summaries.get(product_id, "No reviews available.")
 
-    # Ratings
     actual_rating = product_ratings.get(product_id, None)
     review_count  = product_review_counts.get(product_id, 0)
-    predicted     = predict_rating(product_id)
 
-    # Compatibility
-    score, label, flagged = check_compatibility(routine_ingredients, product_id)
+    # Get personalized routine score + risk label + flagged pairs
+    routine_score, label, flagged = get_routine_score(
+        product_id, routine_ingredients
+    )
 
     # Risk colors
     color_map = {
@@ -189,12 +302,12 @@ def render_product_card(product_id, routine_ingredients):
     color = color_map.get(label, "#888")
     emoji = emoji_map.get(label, "")
 
-    # ── Card ──
+    # ── Card header ──
     st.markdown(f"### 🧴 {brand}")
     st.markdown(f"**{name}**")
     st.divider()
 
-    # Actual rating
+    # ── Actual rating ──
     if actual_rating:
         st.markdown(
             f"⭐ **Actual Rating:** {actual_rating:.2f} / 5 "
@@ -203,31 +316,31 @@ def render_product_card(product_id, routine_ingredients):
     else:
         st.markdown("⭐ **Actual Rating:** Not available")
 
-    # Predicted rating from ML model
-    if predicted and actual_rating:
-        delta = predicted - actual_rating
-        if delta > 0.2:
-            note = " *(ingredient profile suggests higher potential)*"
-        elif delta < -0.2:
-            note = " *(ingredient profile suggests lower potential)*"
-        else:
-            note = " *(aligns with actual rating)*"
-        st.markdown(f"🤖 **Predicted Rating:** {predicted:.2f} / 5{note}")
-    elif predicted:
-        st.markdown(f"🤖 **Predicted Rating:** {predicted:.2f} / 5")
+    # ── Personalized routine score ──
+    if routine_score:
+        st.markdown(
+            f"<div style='background-color:#f0ece6;padding:12px;"
+            f"border-radius:8px;border-left:4px solid #c4a882;margin:10px 0'>"
+            f"<span style='color:#4a4a4a;font-weight:bold;font-size:1.05em'>"
+            f"🔬 Your Routine Score: {routine_score} / 5</span><br>"
+            f"<span style='color:#888;font-size:0.85em'>"
+            f"Personalized based on your ingredients + product quality"
+            f"</span></div>",
+            unsafe_allow_html=True
+        )
 
     st.divider()
 
-    # Compatibility badge
+    # ── Risk badge ──
     st.markdown(
         f"<div style='background-color:{color};padding:10px;border-radius:8px;"
         f"color:white;font-weight:bold;text-align:center;margin:10px 0;"
         f"letter-spacing:0.5px;font-size:0.95em'>"
-        f"{emoji} {label} &nbsp; (score: {score})</div>",
+        f"{emoji} {label}</div>",
         unsafe_allow_html=True
     )
 
-    # Flagged pairs
+    # ── Flagged pairs ──
     if flagged:
         with st.expander("⚠️ Flagged ingredient combinations"):
             for pair, s in flagged:
@@ -237,9 +350,23 @@ def render_product_card(product_id, routine_ingredients):
 
     st.divider()
 
-    # Review summary
+    # ── What people say ──
     st.markdown("**📝 What people say:**")
     st.info(summary)
+
+    # ── What our app says ──
+    explanation = generate_app_explanation(
+        routine_score, label, flagged, actual_rating
+    )
+    st.markdown("**🤖 What our app says:**")
+    st.markdown(
+        f"<div style='background-color:#f0ece6;padding:12px;"
+        f"border-radius:8px;border-left:4px solid #6b8f71;margin:10px 0;"
+        f"color:#4a4a4a;font-size:0.95em;line-height:1.6'>"
+        f"{explanation}"
+        f"</div>",
+        unsafe_allow_html=True
+    )
 
 # ── App layout ─────────────────────────────────────────────────────────────────
 st.title("🧴 Skincare Compatibility Checker")
@@ -249,7 +376,7 @@ st.markdown(
 )
 st.divider()
 
-# ── Sidebar: routine ingredients ───────────────────────────────────────────────
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Your Current Routine")
     st.markdown("Select all ingredients already in your skincare routine:")
@@ -266,7 +393,7 @@ with st.sidebar:
     else:
         st.warning("Select at least one ingredient to check compatibility.")
 
-# ── Main: product search ────────────────────────────────────────────────────────
+# ── Product search ─────────────────────────────────────────────────────────────
 st.subheader("Search Products to Compare")
 
 col1, col2, col3 = st.columns(3)
