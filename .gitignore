@@ -1,12 +1,7 @@
-# Ignore raw data
-data/raw/*
-
-# Ignore large processed files
-data/processed/*
-
-# Ignore notebook checkpoints
-.ipynb_checkpoints/
+# Large raw review files
+data/raw/reviews_*.csv
 
 # Python cache
 __pycache__/
 *.pyc
+.ipynb_checkpoints/
