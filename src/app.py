@@ -11,55 +11,99 @@ st.set_page_config(
     layout="wide"
 )
 
-# ── Load all model artifacts ────────────────────────────────────────────────────
+# ── Styling ────────────────────────────────────────────────────────────────────
+st.markdown("""
+    <style>
+        .stApp {
+            background-color: #f9f7f4;
+        }
+        [data-testid="stSidebar"] {
+            background-color: #f0ece6;
+        }
+        .stButton > button {
+            background-color: #c4a882;
+            color: white;
+            border: none;
+            border-radius: 6px;
+        }
+        hr {
+            border-color: #e0d8cf;
+        }
+        h1, h2, h3 {
+            color: #4a4a4a;
+            font-weight: 500;
+        }
+        .stInfo {
+            background-color: #f0ece6;
+            color: #4a4a4a;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# ── Load all artifacts ─────────────────────────────────────────────────────────
 @st.cache_resource
 def load_artifacts():
-    with open("models/pair_scores.pkl", "rb") as f:
+    with open("results/models/pair_scores.pkl", "rb") as f:
         pair_scores = pickle.load(f)
-    with open("models/product_ingredients.pkl", "rb") as f:
+    with open("results/models/product_ingredients.pkl", "rb") as f:
         product_ingredients = pickle.load(f)
-    with open("models/product_ratings.pkl", "rb") as f:
+    with open("results/models/product_ratings.pkl", "rb") as f:
         product_ratings = pickle.load(f)
-    with open("models/product_review_counts.pkl", "rb") as f:
+    with open("results/models/product_review_counts.pkl", "rb") as f:
         product_review_counts = pickle.load(f)
-    with open("models/product_names.pkl", "rb") as f:
+    with open("results/models/product_names.pkl", "rb") as f:
         product_names = pickle.load(f)
-    with open("models/brand_names.pkl", "rb") as f:
+    with open("results/models/brand_names.pkl", "rb") as f:
         brand_names = pickle.load(f)
-    with open("models/review_summaries.pkl", "rb") as f:
+    with open("results/models/review_summaries.pkl", "rb") as f:
         review_summaries = pickle.load(f)
     with open("data/processed/top_ingredients.pkl", "rb") as f:
         top_ingredients = pickle.load(f)
+    with open("results/models/best_model_final.pkl", "rb") as f:
+        model = pickle.load(f)
+    with open("results/models/scaler_final.pkl", "rb") as f:
+        scaler = pickle.load(f)
+    with open("results/models/top_ingredients_list.pkl", "rb") as f:
+        top_ingredients_list = pickle.load(f)
 
     return (pair_scores, product_ingredients, product_ratings,
             product_review_counts, product_names, brand_names,
-            review_summaries, top_ingredients)
+            review_summaries, top_ingredients, model, scaler,
+            top_ingredients_list)
 
 (pair_scores, product_ingredients, product_ratings,
  product_review_counts, product_names, brand_names,
- review_summaries, top_ingredients) = load_artifacts()
+ review_summaries, top_ingredients, model, scaler,
+ top_ingredients_list) = load_artifacts()
 
-# ── Helper: build product search list ──────────────────────────────────────────
+# ── Load sentiment lookup for accurate predictions ─────────────────────────────
+@st.cache_data
+def load_sentiment_lookup():
+    skincare = pd.read_pickle("data/processed/skincare_final.pkl")
+    return skincare.set_index('product_id')[
+        ['mean_sentiment', 'pct_positive', 'review_count']
+    ].to_dict(orient='index')
+
+sentiment_lookup = load_sentiment_lookup()
+
+# ── Product search options ─────────────────────────────────────────────────────
 @st.cache_data
 def get_product_options():
     options = {
         pid: f"{brand_names.get(pid, '')} — {product_names.get(pid, pid)}"
         for pid in product_names
     }
-    # Sort alphabetically by display name
     return dict(sorted(options.items(), key=lambda x: x[1]))
 
-product_options = get_product_options()
-# Reverse lookup: display name → product_id
-name_to_id = {v: k for k, v in product_options.items()}
+product_options  = get_product_options()
+name_to_id       = {v: k for k, v in product_options.items()}
 
-# ── Helper: compatibility check ─────────────────────────────────────────────────
+# ── Compatibility function ─────────────────────────────────────────────────────
 def check_compatibility(routine_ingredients, product_id):
     if product_id not in product_ingredients:
         return None, "Product not found", []
 
-    new_ings = product_ingredients[product_id]
-
+    new_ings    = product_ingredients[product_id]
     routine_top = [i for i in routine_ingredients if i in top_ingredients]
     new_top     = [i for i in new_ings if i in top_ingredients]
 
@@ -72,7 +116,7 @@ def check_compatibility(routine_ingredients, product_id):
             pair = tuple(sorted([r_ing, n_ing]))
             cross_pairs.append(pair)
 
-    scores = [(pair, pair_scores.get(pair, 1.0)) for pair in cross_pairs]
+    scores    = [(pair, pair_scores.get(pair, 1.0)) for pair in cross_pairs]
     avg_score = np.mean([s for _, s in scores])
 
     flagged = sorted(
@@ -89,21 +133,53 @@ def check_compatibility(routine_ingredients, product_id):
 
     return round(avg_score, 4), label, flagged
 
-# ── Helper: render a product card ──────────────────────────────────────────────
+# ── ML prediction function ─────────────────────────────────────────────────────
+def predict_rating(product_id):
+    if product_id not in product_ingredients:
+        return None
+
+    ing_list   = product_ingredients[product_id]
+
+    # 224 ingredient binary features
+    ing_vector = [1 if ing in ing_list else 0 for ing in top_ingredients_list]
+
+    # 3 sentiment features — use actual stored values, fall back to dataset means
+    sent = sentiment_lookup.get(product_id, {
+        'mean_sentiment': 0.65,
+        'pct_positive':   0.86,
+        'review_count':   0
+    })
+    sentiment_scaled = scaler.transform([[
+        sent['mean_sentiment'],
+        sent['pct_positive'],
+        sent['review_count']
+    ]])
+
+    # Full 227-feature vector — same as Notebook 03
+    features  = np.hstack([ing_vector, sentiment_scaled[0]])
+    predicted = model.predict([features])[0]
+
+    return round(float(np.clip(predicted, 1.0, 5.0)), 2)
+
+# ── Product card renderer ──────────────────────────────────────────────────────
 def render_product_card(product_id, routine_ingredients):
     name    = product_names.get(product_id, product_id)
     brand   = brand_names.get(product_id, "")
-    rating  = product_ratings.get(product_id, None)
-    reviews = product_review_counts.get(product_id, 0)
     summary = review_summaries.get(product_id, "No reviews available.")
 
+    # Ratings
+    actual_rating = product_ratings.get(product_id, None)
+    review_count  = product_review_counts.get(product_id, 0)
+    predicted     = predict_rating(product_id)
+
+    # Compatibility
     score, label, flagged = check_compatibility(routine_ingredients, product_id)
 
-    # Risk color
+    # Risk colors
     color_map = {
-        "Low Risk":      "#2ecc71",
-        "Moderate Risk": "#f39c12",
-        "High Risk":     "#e74c3c"
+        "Low Risk":      "#6b8f71",
+        "Moderate Risk": "#c4a882",
+        "High Risk":     "#a67c7c"
     }
     emoji_map = {
         "Low Risk":      "✅",
@@ -113,22 +189,40 @@ def render_product_card(product_id, routine_ingredients):
     color = color_map.get(label, "#888")
     emoji = emoji_map.get(label, "")
 
-    # Card
+    # ── Card ──
     st.markdown(f"### 🧴 {brand}")
     st.markdown(f"**{name}**")
     st.divider()
 
-    # Rating
-    if rating:
-        st.markdown(f"⭐ **Rating:** {rating:.2f} / 5 &nbsp;&nbsp; "
-                    f"*({int(reviews):,} reviews)*")
+    # Actual rating
+    if actual_rating:
+        st.markdown(
+            f"⭐ **Actual Rating:** {actual_rating:.2f} / 5 "
+            f"&nbsp;&nbsp; *({int(review_count):,} reviews)*"
+        )
     else:
-        st.markdown("⭐ **Rating:** Not available")
+        st.markdown("⭐ **Actual Rating:** Not available")
+
+    # Predicted rating from ML model
+    if predicted and actual_rating:
+        delta = predicted - actual_rating
+        if delta > 0.2:
+            note = " *(ingredient profile suggests higher potential)*"
+        elif delta < -0.2:
+            note = " *(ingredient profile suggests lower potential)*"
+        else:
+            note = " *(aligns with actual rating)*"
+        st.markdown(f"🤖 **Predicted Rating:** {predicted:.2f} / 5{note}")
+    elif predicted:
+        st.markdown(f"🤖 **Predicted Rating:** {predicted:.2f} / 5")
+
+    st.divider()
 
     # Compatibility badge
     st.markdown(
         f"<div style='background-color:{color};padding:10px;border-radius:8px;"
-        f"color:white;font-weight:bold;text-align:center;margin:10px 0'>"
+        f"color:white;font-weight:bold;text-align:center;margin:10px 0;"
+        f"letter-spacing:0.5px;font-size:0.95em'>"
         f"{emoji} {label} &nbsp; (score: {score})</div>",
         unsafe_allow_html=True
     )
@@ -141,11 +235,13 @@ def render_product_card(product_id, routine_ingredients):
     else:
         st.success("No problematic ingredient combinations found.")
 
+    st.divider()
+
     # Review summary
     st.markdown("**📝 What people say:**")
     st.info(summary)
 
-# ── App layout ──────────────────────────────────────────────────────────────────
+# ── App layout ─────────────────────────────────────────────────────────────────
 st.title("🧴 Skincare Compatibility Checker")
 st.markdown(
     "Select your current routine ingredients, then search for up to "
@@ -182,7 +278,6 @@ with col1:
         index=0,
         key="p1"
     )
-
 with col2:
     p2_name = st.selectbox(
         "Product 2",
@@ -190,7 +285,6 @@ with col2:
         index=0,
         key="p2"
     )
-
 with col3:
     p3_name = st.selectbox(
         "Product 3",
@@ -201,7 +295,7 @@ with col3:
 
 st.divider()
 
-# ── Results ─────────────────────────────────────────────────────────────────────
+# ── Results ────────────────────────────────────────────────────────────────────
 selected = [p for p in [p1_name, p2_name, p3_name] if p != ""]
 
 if not routine_ingredients:
