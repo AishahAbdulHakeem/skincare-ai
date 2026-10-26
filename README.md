@@ -175,10 +175,11 @@ next notebook picks them up automatically.
 
 - streamlit
 - pandas
-- numpy
-- scikit-learn
+- numpy >= 2.0
+- scikit-learn==1.8.0
 - vaderSentiment
-- matplotlib 
+- matplotlib
+
 ---
 
 ## Author
