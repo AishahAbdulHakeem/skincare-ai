@@ -179,6 +179,7 @@ next notebook picks them up automatically.
 - scikit-learn==1.8.0
 - vaderSentiment
 - matplotlib
+- xgboost
 
 ---
 
