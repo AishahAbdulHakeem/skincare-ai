@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import pickle
 import itertools
+import html
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -15,30 +16,36 @@ st.set_page_config(
 st.markdown("""
     <style>
         .stApp {
-            background-color: #f9f7f4;
+            background-color: #fdf6f5;
         }
         [data-testid="stSidebar"] {
-            background-color: #f0ece6;
+            background-color: #f8e1e1;
         }
         .stButton > button {
-            background-color: #c4a882;
+            background-color: #d4848f;
             color: white;
             border: none;
             border-radius: 6px;
         }
         hr {
-            border-color: #e0d8cf;
+            border-color: #f1d4d4;
         }
         h1, h2, h3 {
-            color: #4a4a4a;
+            color: #5a3d42;
             font-weight: 500;
-        }
-        .stInfo {
-            background-color: #f0ece6;
-            color: #4a4a4a;
         }
     </style>
 """, unsafe_allow_html=True)
+
+# ── Blush note box (replaces default blue st.info) ─────────────────────────────
+def blush_note(text):
+    st.markdown(
+        f"<div style='background-color:#fbe9e8;padding:12px 16px;"
+        f"border-radius:8px;border:1px solid #f1d4d4;margin:6px 0;"
+        f"color:#5a3d42;font-size:0.95em;line-height:1.6'>"
+        f"{html.escape(str(text))}</div>",
+        unsafe_allow_html=True
+    )
 
 # ── Load all artifacts ─────────────────────────────────────────────────────────
 @st.cache_resource
@@ -290,9 +297,9 @@ def render_product_card(product_id, routine_ingredients):
 
     # Risk colors
     color_map = {
-        "Low Risk":      "#6b8f71",
-        "Moderate Risk": "#c4a882",
-        "High Risk":     "#a67c7c"
+        "Low Risk":      "#8aab8f",
+        "Moderate Risk": "#d9a066",
+        "High Risk":     "#c0616f"
     }
     emoji_map = {
         "Low Risk":      "✅",
@@ -319,9 +326,9 @@ def render_product_card(product_id, routine_ingredients):
     # ── Personalized routine score ──
     if routine_score:
         st.markdown(
-            f"<div style='background-color:#f0ece6;padding:12px;"
-            f"border-radius:8px;border-left:4px solid #c4a882;margin:10px 0'>"
-            f"<span style='color:#4a4a4a;font-weight:bold;font-size:1.05em'>"
+            f"<div style='background-color:#fbe9e8;padding:12px;"
+            f"border-radius:8px;border-left:4px solid #d4848f;margin:10px 0'>"
+            f"<span style='color:#5a3d42;font-weight:bold;font-size:1.05em'>"
             f"🔬 Your Routine Score: {routine_score} / 5</span><br>"
             f"<span style='color:#888;font-size:0.85em'>"
             f"Personalized based on your ingredients + product quality"
@@ -352,7 +359,7 @@ def render_product_card(product_id, routine_ingredients):
 
     # ── What people say ──
     st.markdown("**📝 What people say:**")
-    st.info(summary)
+    blush_note(summary)
 
     # ── What our app says ──
     explanation = generate_app_explanation(
@@ -360,9 +367,9 @@ def render_product_card(product_id, routine_ingredients):
     )
     st.markdown("**🤖 What our app says:**")
     st.markdown(
-        f"<div style='background-color:#f0ece6;padding:12px;"
-        f"border-radius:8px;border-left:4px solid #6b8f71;margin:10px 0;"
-        f"color:#4a4a4a;font-size:0.95em;line-height:1.6'>"
+        f"<div style='background-color:#fbe9e8;padding:12px;"
+        f"border-radius:8px;border-left:4px solid #e8a5ae;margin:10px 0;"
+        f"color:#5a3d42;font-size:0.95em;line-height:1.6'>"
         f"{explanation}"
         f"</div>",
         unsafe_allow_html=True
@@ -426,10 +433,10 @@ st.divider()
 selected = [p for p in [p1_name, p2_name, p3_name] if p != ""]
 
 if not routine_ingredients:
-    st.info("👈 Start by selecting your routine ingredients in the sidebar.")
+    blush_note("👈 Start by selecting your routine ingredients in the sidebar.")
 
 elif not selected:
-    st.info("Search for at least one product above to see the compatibility report.")
+    blush_note("Search for at least one product above to see the compatibility report.")
 
 else:
     st.subheader("Product Reports")
